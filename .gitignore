@@ -1,0 +1,7 @@
+# 构建产物
+mcast-chat.exe
+test/nettest.exe
+*.o
+
+# 调试日志
+debug.log
