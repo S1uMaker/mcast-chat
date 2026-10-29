@@ -24,13 +24,16 @@ class MulticastSocket {
   void stop();
 
   bool send(const uint8_t* data, size_t len, std::string* err = nullptr);
-  // 返回收到的字节数；超时返回 0；出错返回 -1
-  int recv(uint8_t* buf, size_t bufLen);
+  // 返回收到的字节数；超时返回 0；出错返回 -1。fromIp 可空，输出源地址（网络字节序）
+  int recv(uint8_t* buf, size_t bufLen, uint32_t* fromIp = nullptr);
 
  private:
   SOCKET sock_ = INVALID_SOCKET;
   sockaddr_in dst_{};  // 组地址:端口（发送目标）
   bool wsaStarted_ = false;
 };
+
+// IPv4 网络字节序 → 点分十进制（成员列表显示用）
+std::string addr_to_string(uint32_t ipNetOrder);
 
 }  // namespace net

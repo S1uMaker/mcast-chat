@@ -80,7 +80,7 @@ bool MulticastSocket::send(const uint8_t* data, size_t len, std::string* err) {
   return true;
 }
 
-int MulticastSocket::recv(uint8_t* buf, size_t bufLen) {
+int MulticastSocket::recv(uint8_t* buf, size_t bufLen, uint32_t* fromIp) {
   sockaddr_in from{};
   int fromLen = sizeof(from);
   int n = recvfrom(sock_, (char*)buf, static_cast<int>(bufLen), 0, (sockaddr*)&from, &fromLen);
@@ -89,7 +89,16 @@ int MulticastSocket::recv(uint8_t* buf, size_t bufLen) {
     if (e == WSAETIMEDOUT || e == WSAEWOULDBLOCK) return 0;
     return -1;
   }
+  if (fromIp) *fromIp = from.sin_addr.s_addr;
   return n;
+}
+
+std::string addr_to_string(uint32_t ipNetOrder) {
+  IN_ADDR a{};
+  a.s_addr = ipNetOrder;
+  char buf[INET_ADDRSTRLEN] = {0};
+  if (!inet_ntop(AF_INET, &a, buf, sizeof(buf))) return "?";
+  return buf;
 }
 
 }  // namespace net

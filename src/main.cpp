@@ -4,6 +4,7 @@
 #include <string>
 #include "app.hpp"
 #include "core/chat_ctrl.hpp"
+#include "core/member_mgr.hpp"
 #include "net/rx_thread.hpp"
 #include "ui/main_window.hpp"
 #include "util/log.hpp"
@@ -47,6 +48,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     return 1;
   }
 
+  core::members().init_self();
+
   if (!ui::create_main_window(hInst, nCmdShow)) return 1;
   util::dlog("main: window created, hwnd=%p", (void*)app().hwnd);
   if (!net::start_rx_thread()) {
@@ -54,6 +57,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     return 1;
   }
   util::dlog("main: rx thread started, name=%s", name.c_str());
+  core::members().announce();  // 接收线程就绪后再宣告入组，避免丢 ACK
 
   if (!autoSend.empty()) {
     Sleep(1200);  // 等接收方窗口就绪

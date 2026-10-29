@@ -4,7 +4,6 @@
 #include <vector>
 #include <windows.h>
 #include "../app.hpp"
-#include "../util/log.hpp"
 
 namespace net {
 
@@ -14,14 +13,16 @@ static DWORD WINAPI rx_thread_proc(LPVOID) {
   App& a = app();
   std::vector<uint8_t> buf(65536);
   while (!a.rxStop.load()) {
-    int n = a.sock.recv(buf.data(), buf.size());
-    if (n > 0) util::dlog("rx: got %d bytes", n);
+    uint32_t fromIp = 0;
+    int n = a.sock.recv(buf.data(), buf.size(), &fromIp);
     if (n <= 0) continue;  // 超时或瞬时错误
     if (n < static_cast<int>(proto::kHeaderSize)) continue;  // 残包直接丢
-    uint8_t* copy = static_cast<uint8_t*>(malloc(static_cast<size_t>(n)));
-    if (!copy) continue;
-    memcpy(copy, buf.data(), static_cast<size_t>(n));
-    if (!PostMessageW(a.hwnd, WM_APP_RX, static_cast<WPARAM>(n), (LPARAM)copy)) free(copy);
+    RxPacket* pkt = static_cast<RxPacket*>(malloc(sizeof(RxPacket) + static_cast<size_t>(n)));
+    if (!pkt) continue;
+    pkt->fromIp = fromIp;
+    pkt->len = static_cast<uint32_t>(n);
+    memcpy(pkt->data, buf.data(), static_cast<size_t>(n));
+    if (!PostMessageW(a.hwnd, WM_APP_RX, 0, (LPARAM)pkt)) free(pkt);
   }
   return 0;
 }

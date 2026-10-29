@@ -1,9 +1,12 @@
 #include "main_window.hpp"
 #include <commctrl.h>
+#include <windowsx.h>
 #include <cstdlib>
 #include <cwchar>
+#include <vector>
 #include "../app.hpp"
 #include "../core/chat_ctrl.hpp"
+#include "../core/member_mgr.hpp"
 #include "../net/rx_thread.hpp"
 #include "../protocol/codec.hpp"
 #include "../protocol/message.hpp"
@@ -18,6 +21,8 @@ constexpr int IDC_MEMBERS = 102;
 constexpr int IDC_INPUT   = 103;
 constexpr int IDC_SEND    = 104;
 constexpr int IDC_STATUS  = 105;
+constexpr int IDM_KICK    = 40001;
+constexpr UINT_PTR TIMER_TICK = 1;
 
 HWND g_chat = nullptr;
 HWND g_members = nullptr;
@@ -26,6 +31,9 @@ HWND g_send = nullptr;
 HWND g_status = nullptr;
 HFONT g_font = nullptr;
 WNDPROC g_inputProc = nullptr;  // 输入框原窗口过程（手动子类化：回车即发送）
+std::vector<core::Member> g_rows;  // 与成员列表行一一对应（右键踢人用）
+bool g_kicked = false;
+ULONGLONG g_kickExitAt = 0;
 
 std::wstring time_prefix() {
   SYSTEMTIME t;
@@ -54,59 +62,131 @@ void append_chat_line(const std::wstring& line) {
   SendMessageW(g_chat, EM_SETREADONLY, TRUE, 0);
 }
 
+void append_system(const std::wstring& msg) {
+  append_chat_line(time_prefix() + L"[系统] " + msg);
+}
+
 void update_status() {
   App& a = app();
   std::wstring s = L"已加入 " + util::utf8_to_wide(net::kDefaultGroup) + L":" +
                    std::to_wstring(static_cast<int>(net::kDefaultPort)) +
                    L"   昵称: " + util::utf8_to_wide(a.name) +
+                   (core::members().is_host() ? L"（房主）" : L"") +
+                   L"   成员: " + std::to_wstring(core::members().count()) +
                    L"   收到 " + std::to_wstring(a.rxCount.load()) + L" 条聊天";
-  LRESULT r = SendMessageW(g_status, SB_SETTEXTW, 0, (LPARAM)s.c_str());
-  util::dlog("update_status: SB_SETTEXTW -> %td", r);
+  SendMessageW(g_status, SB_SETTEXTW, 0, (LPARAM)s.c_str());
+}
+
+// 按成员表重建列表：昵称 / 地址 / 状态 / 角色
+void refresh_member_list() {
+  g_rows = core::members().snapshot();
+  ListView_DeleteAllItems(g_members);
+  const proto::Uuid hostId = core::members().host_id();
+  for (size_t i = 0; i < g_rows.size(); ++i) {
+    const core::Member& m = g_rows[i];
+    std::wstring name = util::utf8_to_wide(m.name) + (m.self ? L"（我）" : L"");
+    std::wstring ip = m.self ? L"(本机)" : util::utf8_to_wide(net::addr_to_string(m.ip));
+    std::wstring status = m.online ? L"在线" : L"离线";
+    const wchar_t* role = (m.id == hostId) ? L"房主" : L"成员";
+
+    LVITEMW it{};
+    it.mask = LVIF_TEXT;
+    it.iItem = static_cast<int>(i);
+    it.pszText = (LPWSTR)name.c_str();
+    ListView_InsertItem(g_members, &it);
+    ListView_SetItemText(g_members, static_cast<int>(i), 1, (LPWSTR)ip.c_str());
+    ListView_SetItemText(g_members, static_cast<int>(i), 2, (LPWSTR)status.c_str());
+    ListView_SetItemText(g_members, static_cast<int>(i), 3, (LPWSTR)role);
+  }
+  update_status();
+}
+
+void on_kicked_self(const std::wstring& hostName) {
+  g_kicked = true;
+  g_kickExitAt = GetTickCount64() + 3000;
+  append_system(L"你已被房主 " + hostName + L" 移出聊天组，3 秒后自动退出");
+  EnableWindow(g_input, FALSE);
+  EnableWindow(g_send, FALSE);
+  update_status();
+  util::dlog("ui: kicked by host, will exit");
+}
+
+void handle_member_events() {
+  auto events = core::members().drain_events();
+  if (events.empty()) return;
+  for (const auto& e : events) {
+    std::wstring name = util::utf8_to_wide(e.name);
+    switch (e.kind) {
+      case core::MemberEvent::Joined:      append_system(name + L" 加入了聊天组"); break;
+      case core::MemberEvent::Left:        append_system(name + L" 离开了聊天组"); break;
+      case core::MemberEvent::Kicked:      append_system(name + L" 被移出聊天组"); break;
+      case core::MemberEvent::Offline:     append_system(name + L" 离线"); break;
+      case core::MemberEvent::Online:      append_system(name + L" 恢复在线"); break;
+      case core::MemberEvent::HostChanged: append_system(name + L" 成为房主"); break;
+      case core::MemberEvent::KickedSelf:  on_kicked_self(name); break;
+    }
+  }
+  refresh_member_list();
+}
+
+void do_kick_row(int row) {
+  if (row < 0 || row >= static_cast<int>(g_rows.size())) return;
+  std::string err;
+  if (!core::members().kick(g_rows[row].id, &err)) {
+    MessageBoxW(app().hwnd, util::utf8_to_wide(err).c_str(), L"无法踢出", MB_ICONWARNING);
+    return;
+  }
+  handle_member_events();  // 立即刷新本地 UI（不等 1s 节拍）
 }
 
 void on_send() {
   wchar_t buf[4096];
   int n = GetWindowTextW(g_input, buf, 4096);
-  util::dlog("on_send: enter, text_len=%d", n);
   std::wstring text = trim(std::wstring(buf, static_cast<size_t>(n)));
   if (text.empty()) return;
 
   std::string err;
   if (core::send_text(util::wide_to_utf8(text), &err)) {
-    util::dlog("on_send: send ok");
     append_chat_line(time_prefix() + L"我: " + text);  // 本地回显；回环包按 UUID 丢弃
-    util::dlog("on_send: echo appended, chat_len=%d", GetWindowTextLengthW(g_chat));
     SetWindowTextW(g_input, L"");
   } else {
-    util::dlog("on_send: send FAILED: %s", err.c_str());
     MessageBoxW(app().hwnd, util::utf8_to_wide("发送失败: " + err).c_str(), L"错误", MB_ICONERROR);
   }
 }
 
-// 接收线程投递上来的报文（data 为堆指针，本函数负责释放）
-void handle_rx(size_t len, uint8_t* data) {
+// 接收线程投递上来的报文（raw 为堆指针，本函数负责释放）
+void handle_rx(RxPacket* raw) {
   App& a = app();
   proto::Packet pkt;
-  bool parsed = proto::parse_packet(data, len, pkt);
-  util::dlog("rx-ui: len=%zu parsed=%d", len, (int)parsed);
-  if (parsed) {
-    if (pkt.hdr.type == proto::MSG_CHAT_TEXT && pkt.hdr.sender != a.uuid) {
-      proto::Reader r(pkt.payload, pkt.payload_len);
-      std::string name, text;
-      if (r.utf8(name) && r.utf8(text) && r.ok()) {
-        a.rxCount.fetch_add(1);
-        util::dlog("rx-ui: text from=%s", name.c_str());
-        append_chat_line(time_prefix() + util::utf8_to_wide(name) + L": " +
-                         util::utf8_to_wide(text));
-        util::dlog("rx-ui: appended, chat_len=%d", GetWindowTextLengthW(g_chat));
-        update_status();
-      } else {
-        util::dlog("rx-ui: TEXT payload parse failed");
+  if (proto::parse_packet(raw->data, raw->len, pkt) && pkt.hdr.sender != a.uuid) {
+    switch (pkt.hdr.type) {
+      case proto::MSG_CHAT_TEXT: {
+        proto::Reader r(pkt.payload, pkt.payload_len);
+        std::string name, text;
+        if (r.utf8(name) && r.utf8(text) && r.ok()) {
+          a.rxCount.fetch_add(1);
+          append_chat_line(time_prefix() + util::utf8_to_wide(name) + L": " +
+                           util::utf8_to_wide(text));
+          update_status();
+        }
+        break;
       }
+      case proto::MSG_HELLO:
+      case proto::MSG_HELLO_ACK:
+      case proto::MSG_HEARTBEAT:
+      case proto::MSG_BYE:
+      case proto::MSG_KICK: {
+        proto::Reader r(pkt.payload, pkt.payload_len);
+        core::members().on_packet(pkt.hdr, r, raw->fromIp);
+        handle_member_events();
+        if (core::members().take_dirty()) refresh_member_list();  // 静默变化（ACK/心跳入表）
+        break;
+      }
+      default:
+        break;  // FILE_* / KEY_DIST 由 M3/M4 接管
     }
-    // 其余类型（HELLO / FILE_* / KICK…）由 M2+ 的对应模块接管
   }
-  free(data);
+  free(raw);
 }
 
 LRESULT CALLBACK input_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -123,26 +203,19 @@ void create_controls(HWND hwnd, HINSTANCE hInst) {
       0, 0, 0, 0, hwnd, (HMENU)IDC_CHAT, hInst, nullptr);
 
   g_members = CreateWindowExW(0, WC_LISTVIEWW, L"",
-      WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT,
+      WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL,
       0, 0, 0, 0, hwnd, (HMENU)IDC_MEMBERS, hInst, nullptr);
   ListView_SetExtendedListViewStyle(g_members, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
   LVCOLUMNW col{};
   col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-  col.pszText = (LPWSTR)L"成员"; col.cx = 110; col.iSubItem = 0;
+  col.pszText = (LPWSTR)L"昵称"; col.cx = 105; col.iSubItem = 0;
   ListView_InsertColumn(g_members, 0, &col);
-  col.pszText = (LPWSTR)L"地址"; col.cx = 120; col.iSubItem = 1;
+  col.pszText = (LPWSTR)L"地址"; col.cx = 110; col.iSubItem = 1;
   ListView_InsertColumn(g_members, 1, &col);
-  col.pszText = (LPWSTR)L"状态"; col.cx = 60; col.iSubItem = 2;
+  col.pszText = (LPWSTR)L"状态"; col.cx = 45; col.iSubItem = 2;
   ListView_InsertColumn(g_members, 2, &col);
-  // M1：成员列表先只放自己；M2 由 MemberManager（HELLO/心跳）维护
-  std::wstring myName = util::utf8_to_wide(app().name);
-  LVITEMW it{};
-  it.mask = LVIF_TEXT;
-  it.iItem = 0;
-  it.pszText = (LPWSTR)myName.c_str();
-  ListView_InsertItem(g_members, &it);
-  ListView_SetItemText(g_members, 0, 1, (LPWSTR)L"(本机)");
-  ListView_SetItemText(g_members, 0, 2, (LPWSTR)L"在线");
+  col.pszText = (LPWSTR)L"角色"; col.cx = 45; col.iSubItem = 3;
+  ListView_InsertColumn(g_members, 3, &col);
 
   g_input = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
       WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)IDC_INPUT, hInst, nullptr);
@@ -162,7 +235,7 @@ void layout(HWND hwnd) {
   if (!g_chat || !g_members || !g_input || !g_send || !g_status) return;
   RECT rc;
   GetClientRect(hwnd, &rc);
-  const int pad = 8, listW = 280, btnW = 96, inputH = 30;
+  const int pad = 8, listW = 320, btnW = 96, inputH = 30;
   SendMessageW(g_status, WM_SIZE, 0, 0);  // 状态栏自适应宽度
   RECT sr;
   GetWindowRect(g_status, &sr);
@@ -178,6 +251,22 @@ void layout(HWND hwnd) {
   MoveWindow(g_send, pad * 2 + chatW, by, btnW, inputH, TRUE);
 }
 
+void show_member_menu(HWND hwnd, POINT pt) {
+  POINT client = pt;
+  ScreenToClient(g_members, &client);
+  LVHITTESTINFO ht{};
+  ht.pt = client;
+  int row = ListView_HitTest(g_members, &ht);
+  if (row < 0 || row >= static_cast<int>(g_rows.size())) return;
+
+  const bool canKick = core::members().is_host() && !g_rows[row].self;
+  HMENU menu = CreatePopupMenu();
+  AppendMenuW(menu, MF_STRING | (canKick ? MF_ENABLED : MF_GRAYED), IDM_KICK, L"踢出该成员");
+  int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+  DestroyMenu(menu);
+  if (cmd == IDM_KICK && canKick) do_kick_row(row);
+}
+
 LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
   switch (msg) {
     case WM_CREATE: {
@@ -187,7 +276,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
       create_controls(hwnd, ((LPCREATESTRUCTW)l)->hInstance);
       g_inputProc = (WNDPROC)SetWindowLongPtrW(g_input, GWLP_WNDPROC, (LONG_PTR)input_proc);
       SetFocus(g_input);
-      update_status();
+      refresh_member_list();
+      SetTimer(hwnd, TIMER_TICK, 1000, nullptr);  // 1s 节拍：心跳/超时/被踢退出
       return 0;
     }
     case WM_SIZE:
@@ -196,21 +286,48 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     case WM_SETFOCUS:
       SetFocus(g_input);
       return 0;
-    case WM_APP_RX:
-      handle_rx(static_cast<size_t>(w), (uint8_t*)l);
-      return 0;
-    case WM_COMMAND:
-      if (LOWORD(w) == IDC_SEND && HIWORD(w) == BN_CLICKED) {
-        util::dlog("wm_command: SEND clicked");
-        on_send();
+    case WM_TIMER:
+      if (w == TIMER_TICK) {
+        if (g_kicked && GetTickCount64() >= g_kickExitAt) {
+          DestroyWindow(hwnd);
+          return 0;
+        }
+        core::members().tick();
+        handle_member_events();
+        if (core::members().take_dirty()) refresh_member_list();
       }
       return 0;
+    case WM_APP_RX:
+      handle_rx(reinterpret_cast<RxPacket*>(l));
+      return 0;
+    case WM_APP_KICK_ROW:  // 测试钩子：与右键菜单走同一踢人流程
+      do_kick_row(static_cast<int>(w));
+      return 0;
+    case WM_CONTEXTMENU:
+      if ((HWND)w == g_members) {
+        POINT pt;
+        if (static_cast<int>(l) == -1) {
+          GetCursorPos(&pt);
+        } else {
+          pt.x = GET_X_LPARAM(l);
+          pt.y = GET_Y_LPARAM(l);
+        }
+        show_member_menu(hwnd, pt);
+        return 0;
+      }
+      break;
+    case WM_COMMAND:
+      if (LOWORD(w) == IDC_SEND && HIWORD(w) == BN_CLICKED) on_send();
+      return 0;
     case WM_DESTROY: {
+      KillTimer(hwnd, TIMER_TICK);
+      core::members().shutdown();  // 发送 BYE：其他成员立即移除我
       net::stop_rx_thread();
       app().sock.stop();
       // 清掉消息队列里尚未处理的 WM_APP_RX，避免退出时泄漏
       MSG m;
-      while (PeekMessageW(&m, hwnd, WM_APP_RX, WM_APP_RX, PM_REMOVE)) free((void*)m.lParam);
+      while (PeekMessageW(&m, hwnd, WM_APP_RX, WM_APP_RX, PM_REMOVE))
+        free(reinterpret_cast<RxPacket*>(m.lParam));
       if (g_font) { DeleteObject(g_font); g_font = nullptr; }
       PostQuitMessage(0);
       return 0;
@@ -236,7 +353,7 @@ bool create_main_window(HINSTANCE hInst, int nCmdShow) {
 
   std::wstring title = L"多播聊天 - " + util::utf8_to_wide(app().name);
   HWND hwnd = CreateWindowExW(0, wc.lpszClassName, title.c_str(), WS_OVERLAPPEDWINDOW,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 1000, 640,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 1040, 660,
                               nullptr, nullptr, hInst, nullptr);
   if (!hwnd) return false;
   ShowWindow(hwnd, nCmdShow);

@@ -5,7 +5,7 @@ LIBS     = -lws2_32 -lcomctl32 -lshell32 -lrpcrt4 -lgdi32 -luser32
 SRCS = src/main.cpp src/app.cpp src/util/text.cpp src/util/log.cpp \
        src/net/multicast.cpp src/net/rx_thread.cpp \
        src/protocol/codec.cpp \
-       src/core/chat_ctrl.cpp \
+       src/core/chat_ctrl.cpp src/core/member_mgr.cpp \
        src/ui/main_window.cpp
 
 all: mcast-chat.exe

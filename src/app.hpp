@@ -5,9 +5,18 @@
 #include <windows.h>
 #include "protocol/message.hpp"
 
-// UI 线程自定义消息：接收线程把整包拷到堆上后 Post 过来
-// wParam = 报文长度, lParam = 堆指针（UI 处理后须 free）
+// UI 线程自定义消息
+// WM_APP_RX:        lParam = RxPacket*（接收线程堆分配，UI 处理后 free）
+// WM_APP_KICK_ROW:  wParam = 成员列表行号（自动化测试钩子，走与右键菜单相同的踢人流程）
 #define WM_APP_RX (WM_APP + 1)
+#define WM_APP_KICK_ROW (WM_APP + 2)
+
+// 接收线程 → UI 线程的报文载体（malloc 时按 sizeof(RxPacket) + len 分配）
+struct RxPacket {
+  uint32_t fromIp = 0;  // 源 IP（网络字节序）
+  uint32_t len = 0;     // 报文长度
+  uint8_t data[1];      // 实际可用长度为 len
+};
 
 struct App {
   std::string name;              // UTF-8 昵称
