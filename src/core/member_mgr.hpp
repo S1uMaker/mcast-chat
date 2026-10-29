@@ -43,6 +43,7 @@ class MemberManager {
   bool take_dirty();                     // 成员表有展示相关变化（供 UI 刷新）
   bool is_host() const;
   proto::Uuid host_id() const;
+  std::string name_of(const proto::Uuid& id) const;  // 不在表内返回空串
   size_t count() const { return list_.size(); }
 
   bool kick(const proto::Uuid& target, std::string* err);  // 仅房主有效

@@ -30,6 +30,8 @@ struct App {
   std::atomic<long> rxCount{0};  // 收到的聊天条数（状态栏显示）
 
   bool init(const std::string& userName);  // 生成 UUID 等身份信息
+
+  int testDropEvery = 0;  // 测试钩子：接收文件时每第 N 块丢弃（验证 NACK 重传），0=不丢
 };
 
 App& app();  // 全局单例

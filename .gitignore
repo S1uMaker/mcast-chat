@@ -5,3 +5,5 @@ test/nettest.exe
 
 # 调试日志
 debug.log
+received/
+test/sample_*.bin

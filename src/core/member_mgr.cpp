@@ -341,4 +341,10 @@ bool MemberManager::is_host() const { return hostValid_ && hostId_ == app().uuid
 
 proto::Uuid MemberManager::host_id() const { return hostId_; }
 
+std::string MemberManager::name_of(const proto::Uuid& id) const {
+  for (const auto& m : list_)
+    if (m.id == id) return m.name;
+  return std::string();
+}
+
 }  // namespace core

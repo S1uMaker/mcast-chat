@@ -106,11 +106,11 @@ function StatusOf($h) {
   return [WinEnum]::ReadText($s)
 }
 
-$a = $null; $b = $null; $b2 = $null; $b3 = $null
+$a = $null; $b = $null; $b2 = $null; $b3 = $null; $b4 = $null
 try {
   # ---------- 1. Host starts alone ----------
   Write-Host "[smoke] PHASE 1: host starts alone"
-  $a = Start-Process -FilePath $exePath -ArgumentList "ZhangSan" -PassThru
+  $a = Start-Process -FilePath $exePath -ArgumentList "ZhangSan","--drop","5" -PassThru
   Start-Sleep -Milliseconds 1500
   $ha = HwndOf $a
   $statusA0 = StatusOf($ha)
@@ -187,9 +187,36 @@ try {
   Write-Host "[smoke] A chat after 22s: $((ChatOf $ha) -replace "`r`n", ' | ')"
   Check ((ChatOf $ha) -match "LiSi 离开了聊天组") "A removes LiSi after 20s"
   Check ((StatusOf $ha) -match "成员: 1") "A member count = 1 after timeout"
+
+  # ---------- 7. File transfer with ~20% induced loss (NACK retransmission) ----------
+  # A 以 --drop 5 启动：接收时丢弃每第 5 块（≈20% 丢包），必须靠 NACK 重传收全
+  Write-Host "[smoke] PHASE 7: file transfer with ~20% induced loss"
+  $sampleName = "sample_" + (Get-Random) + ".bin"
+  $sample = Join-Path (Get-Location).Path $sampleName
+  $bytes = New-Object byte[] 2097152   # 2 MB 随机数据
+  (New-Object Random 42).NextBytes($bytes)
+  [IO.File]::WriteAllBytes($sample, $bytes)
+  $b4 = Start-Process -FilePath $exePath -ArgumentList "WangWu","--sendfile",$sample -PassThru
+  $recvDone = $false
+  for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Seconds 3
+    if ((ChatOf $ha) -match ($sampleName + " 接收完成")) { $recvDone = $true; break }
+  }
+  Write-Host "[smoke] A chat tail: $(((ChatOf $ha) -split "`r`n" | Select-Object -Last 4) -join ' | ')"
+  Check $recvDone "file received within 90s despite ~20% loss"
+  Check ((ChatOf $ha) -match "请求重传") "NACK retransmission was exercised"
+  $recvPath = Join-Path (Join-Path (Get-Location).Path "received") $sampleName
+  Check (Test-Path $recvPath) "received file saved under received/"
+  if (Test-Path $recvPath) {
+    $h1 = (Get-FileHash $sample -Algorithm SHA256).Hash
+    $h2 = (Get-FileHash $recvPath -Algorithm SHA256).Hash
+    Check ($h1 -eq $h2) "SHA-256 of received file matches source"
+  }
+  Stop-Process -Id $b4.Id -Force -ErrorAction SilentlyContinue
+  Remove-Item $sample -Force -ErrorAction SilentlyContinue
 }
 finally {
-  foreach ($p in @($a, $b, $b2, $b3)) {
+  foreach ($p in @($a, $b, $b2, $b3, $b4)) {
     if ($p -ne $null) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
   }
 }

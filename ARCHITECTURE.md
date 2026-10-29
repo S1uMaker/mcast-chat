@@ -142,6 +142,18 @@ UDP 多播不可靠，大文件必须自己补可靠性（本设计 = 简化 NOR
   `ShellExecute` 交给系统默认播放器；传输中显示进度条。
 - 多个接收方各自独立收，发送方一次多播、无需逐个发送（1-N 语义天然满足）。
 
+**M3 实现备注**（已完成）：
+
+- 节拍：发送线程 500 包/秒（`timeBeginPeriod(1)` 保证 Sleep 精度）；单文件并发。
+- META 开头连发 3 次抗丢包；传输中每 5 秒重发一次，晚加入者可中途接入（缺失块由 NACK 区间覆盖）。
+- NACK 用"缺失区间"编码（`[start,end]` 对），单个报文最多 160 个区间、超出自动分包；
+  2GB 文件全部缺失也只有 1 个区间，不会撑爆报文。
+- 接收端自驱评估：收到 END 后 800ms 复查位图，发 NACK 后 2.5s 再复查；5 轮未收全放弃。
+- 发送端按 2s 窗口收集 NACK → 只重传缺失块 → 重发 END；窗口无 NACK 即完成；
+  5 轮后仍有 NACK 则发 `FILE_CANCEL` 放弃。
+- 接收 30s 无活动判超时；收全后先落 `.part`，SHA-256 校验通过才改名为
+  `received/<原名>`（重名自动加 " (1)"）；UI"▶ 播放"按钮调系统默认播放器。
+
 ## 8. 安全设计（需求 d，加分项）
 
 密钥分层：**RSA-2048 管身份和"发钥匙"，AES-256-GCM 管实际加密**（非对称算法
@@ -186,8 +198,10 @@ mcast-chat/
     ├── core/
     │   ├── chat_ctrl.hpp/.cpp   聊天组包与发送                      [M1 ✔]
     │   ├── member_mgr.hpp/.cpp  成员表/握手/心跳超时/房主/踢人      [M2 ✔]
-    │   └── file_xfer.hpp/.cpp   文件收发状态机 + pacing + NACK      [M3 待做]
-    ├── crypto/              （M4 待做）CNG RSA-2048 / AES-256-GCM / 组密钥分发
+    │   └── file_xfer.hpp/.cpp   文件收发状态机 + pacing + NACK      [M3 ✔]
+    ├── crypto/
+    │   ├── sha256.hpp/.cpp  CNG SHA-256（文件完整性校验）           [M3 ✔]
+    │   └── cng_rsa / cng_aes / secure_session（M4 待做）RSA-2048 / AES-256-GCM / 组密钥
     ├── util/
     │   ├── text.hpp/.cpp    UTF-8 ↔ UTF-16 转换、UTF-8 安全截断     [M1 ✔]
     │   └── log.hpp/.cpp     debug.log 调试日志                      [M1 ✔]

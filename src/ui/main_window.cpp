@@ -1,11 +1,14 @@
 #include "main_window.hpp"
 #include <commctrl.h>
+#include <commdlg.h>
+#include <shellapi.h>
 #include <windowsx.h>
 #include <cstdlib>
 #include <cwchar>
 #include <vector>
 #include "../app.hpp"
 #include "../core/chat_ctrl.hpp"
+#include "../core/file_xfer.hpp"
 #include "../core/member_mgr.hpp"
 #include "../net/rx_thread.hpp"
 #include "../protocol/codec.hpp"
@@ -16,12 +19,15 @@
 namespace ui {
 namespace {
 
-constexpr int IDC_CHAT    = 101;
-constexpr int IDC_MEMBERS = 102;
-constexpr int IDC_INPUT   = 103;
-constexpr int IDC_SEND    = 104;
-constexpr int IDC_STATUS  = 105;
-constexpr int IDM_KICK    = 40001;
+constexpr int IDC_CHAT     = 101;
+constexpr int IDC_MEMBERS  = 102;
+constexpr int IDC_INPUT    = 103;
+constexpr int IDC_SEND     = 104;
+constexpr int IDC_STATUS   = 105;
+constexpr int IDC_SENDFILE = 106;
+constexpr int IDC_PLAY     = 107;
+constexpr int IDC_PROGRESS = 108;
+constexpr int IDM_KICK     = 40001;
 constexpr UINT_PTR TIMER_TICK = 1;
 
 HWND g_chat = nullptr;
@@ -29,9 +35,13 @@ HWND g_members = nullptr;
 HWND g_input = nullptr;
 HWND g_send = nullptr;
 HWND g_status = nullptr;
+HWND g_sendfile = nullptr;
+HWND g_progress = nullptr;
+HWND g_play = nullptr;
 HFONT g_font = nullptr;
 WNDPROC g_inputProc = nullptr;  // 输入框原窗口过程（手动子类化：回车即发送）
 std::vector<core::Member> g_rows;  // 与成员列表行一一对应（右键踢人用）
+std::wstring g_lastReceived;       // 最近一次接收完成的文件（播放按钮）
 bool g_kicked = false;
 ULONGLONG g_kickExitAt = 0;
 
@@ -68,12 +78,24 @@ void append_system(const std::wstring& msg) {
 
 void update_status() {
   App& a = app();
+  auto pct = [](uint64_t d, uint64_t t) {
+    return std::to_wstring(t ? static_cast<int>(d * 100 / t) : 0) + L"%";
+  };
   std::wstring s = L"已加入 " + util::utf8_to_wide(net::kDefaultGroup) + L":" +
                    std::to_wstring(static_cast<int>(net::kDefaultPort)) +
                    L"   昵称: " + util::utf8_to_wide(a.name) +
                    (core::members().is_host() ? L"（房主）" : L"") +
                    L"   成员: " + std::to_wstring(core::members().count()) +
                    L"   收到 " + std::to_wstring(a.rxCount.load()) + L" 条聊天";
+  if (core::filexfer().receiving()) {
+    s += L"   ⇨ 接收 " + util::utf8_to_wide(core::filexfer().recv_name()) + L" " +
+         pct(core::filexfer().recv_done(), core::filexfer().recv_total());
+  } else if (core::filexfer().sending()) {
+    s += L"   ⇨ 发送 " + util::utf8_to_wide(core::filexfer().send_name()) + L" " +
+         pct(core::filexfer().send_done(), core::filexfer().send_total());
+  }
+  if (core::filexfer().retx_round() > 0)
+    s += L"（重传第 " + std::to_wstring(core::filexfer().retx_round()) + L" 轮）";
   SendMessageW(g_status, SB_SETTEXTW, 0, (LPARAM)s.c_str());
 }
 
@@ -139,6 +161,59 @@ void do_kick_row(int row) {
   handle_member_events();  // 立即刷新本地 UI（不等 1s 节拍）
 }
 
+void handle_xfer_events() {
+  for (const auto& e : core::filexfer().drain_events()) {
+    std::wstring name = util::utf8_to_wide(e.name);
+    switch (e.kind) {
+      case core::XferEvent::SendStarted:
+        SendMessageW(g_progress, PBM_SETPOS, 0, 0);
+        append_system(L"开始发送 " + name);
+        break;
+      case core::XferEvent::SendDone:
+        append_system(name + L" 发送完成");
+        break;
+      case core::XferEvent::SendFailed:
+        append_system(name + L" 发送失败：" + util::utf8_to_wide(e.detail));
+        break;
+      case core::XferEvent::RecvStarted: {
+        SendMessageW(g_progress, PBM_SETPOS, 0, 0);
+        EnableWindow(g_play, FALSE);
+        std::wstring from = util::utf8_to_wide(core::members().name_of(e.sender));
+        append_system(L"开始接收 " + name + L"（来自 " +
+                      (from.empty() ? std::wstring(L"未知成员") : from) + L"）");
+        break;
+      }
+      case core::XferEvent::RecvNack:
+        append_system(name + L" " + util::utf8_to_wide(e.detail));
+        break;
+      case core::XferEvent::RecvDone:
+        append_system(name + L" 接收完成，已保存到 " + util::utf8_to_wide(e.path) +
+                      L"，可点【▶ 播放】观看");
+        g_lastReceived = util::utf8_to_wide(e.path);
+        EnableWindow(g_play, TRUE);
+        break;
+      case core::XferEvent::RecvFailed:
+        append_system(name + L" 接收失败：" + util::utf8_to_wide(e.detail));
+        break;
+    }
+  }
+}
+
+void on_send_file(HWND hwnd) {
+  wchar_t file[MAX_PATH] = L"";
+  OPENFILENAMEW ofn{};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = hwnd;
+  ofn.lpstrFilter = L"所有文件 (*.*)\0*.*\0\0";
+  ofn.lpstrFile = file;
+  ofn.nMaxFile = MAX_PATH;
+  ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+  if (!GetOpenFileNameW(&ofn)) return;
+  std::string err;
+  if (!core::filexfer().start_send(util::wide_to_utf8(file), &err))
+    MessageBoxW(hwnd, util::utf8_to_wide(err).c_str(), L"无法发送", MB_ICONWARNING);
+}
+
 void on_send() {
   wchar_t buf[4096];
   int n = GetWindowTextW(g_input, buf, 4096);
@@ -182,8 +257,18 @@ void handle_rx(RxPacket* raw) {
         if (core::members().take_dirty()) refresh_member_list();  // 静默变化（ACK/心跳入表）
         break;
       }
+      case proto::MSG_FILE_META:
+      case proto::MSG_FILE_DATA:
+      case proto::MSG_FILE_END:
+      case proto::MSG_NACK:
+      case proto::MSG_FILE_CANCEL: {
+        proto::Reader r(pkt.payload, pkt.payload_len);
+        core::filexfer().on_packet(pkt.hdr, r, raw->fromIp);
+        handle_xfer_events();
+        break;
+      }
       default:
-        break;  // FILE_* / KEY_DIST 由 M3/M4 接管
+        break;  // KEY_DIST 由 M4 接管
     }
   }
   free(raw);
@@ -221,34 +306,49 @@ void create_controls(HWND hwnd, HINSTANCE hInst) {
       WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)IDC_INPUT, hInst, nullptr);
   g_send = CreateWindowExW(0, L"BUTTON", L"发送",
       WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 0, 0, 0, 0, hwnd, (HMENU)IDC_SEND, hInst, nullptr);
+
+  g_sendfile = CreateWindowExW(0, L"BUTTON", L"发文件…",
+      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, (HMENU)IDC_SENDFILE, hInst, nullptr);
+  g_progress = CreateWindowExW(0, PROGRESS_CLASSW, L"",
+      WS_CHILD | WS_VISIBLE | PBS_SMOOTH, 0, 0, 0, 0, hwnd, (HMENU)IDC_PROGRESS, hInst, nullptr);
+  SendMessageW(g_progress, PBM_SETRANGE32, 0, MAKELPARAM(0, 100));
+  SendMessageW(g_progress, PBM_SETPOS, 0, 0);
+  g_play = CreateWindowExW(0, L"BUTTON", L"▶ 播放",
+      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED, 0, 0, 0, 0, hwnd, (HMENU)IDC_PLAY,
+      hInst, nullptr);
+
   g_status = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE,
       0, 0, 0, 0, hwnd, (HMENU)IDC_STATUS, hInst, nullptr);
 
   g_font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
       DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
-  HWND ctrls[] = {g_chat, g_members, g_input, g_send, g_status};
+  HWND ctrls[] = {g_chat, g_members, g_input, g_send, g_sendfile, g_play, g_status};
   for (HWND h : ctrls) SendMessageW(h, WM_SETFONT, (WPARAM)g_font, TRUE);
 }
 
 void layout(HWND hwnd) {
-  if (!g_chat || !g_members || !g_input || !g_send || !g_status) return;
+  if (!g_chat || !g_members || !g_input || !g_send || !g_status || !g_progress) return;
   RECT rc;
   GetClientRect(hwnd, &rc);
-  const int pad = 8, listW = 320, btnW = 96, inputH = 30;
+  const int pad = 8, listW = 320, btnW = 96, inputH = 30, xferH = 30, xfBtnW = 88;
   SendMessageW(g_status, WM_SIZE, 0, 0);  // 状态栏自适应宽度
   RECT sr;
   GetWindowRect(g_status, &sr);
   int statusH = sr.bottom - sr.top;
   int bottom = rc.bottom - statusH - pad;
-  int topH = bottom - pad - inputH - pad;  // 聊天区/成员列表的高度
+  int inputY = bottom - inputH;
+  int xferY = inputY - pad - xferH;         // 传输行（发文件/进度/播放）
+  int chatH = xferY - pad * 2;              // 聊天区/成员列表高度
   int chatW = rc.right - listW - pad * 3;
 
-  MoveWindow(g_chat, pad, pad, chatW, topH - pad, TRUE);
-  MoveWindow(g_members, pad * 2 + chatW, pad, listW, topH - pad, TRUE);
-  int by = bottom - inputH;
-  MoveWindow(g_input, pad, by, chatW, inputH, TRUE);
-  MoveWindow(g_send, pad * 2 + chatW, by, btnW, inputH, TRUE);
+  MoveWindow(g_chat, pad, pad, chatW, chatH, TRUE);
+  MoveWindow(g_members, pad * 2 + chatW, pad, listW, chatH, TRUE);
+  MoveWindow(g_sendfile, pad, xferY, xfBtnW, xferH, TRUE);
+  MoveWindow(g_progress, pad + xfBtnW + pad, xferY, chatW - xfBtnW * 2 - pad * 2, xferH, TRUE);
+  MoveWindow(g_play, pad + chatW - xfBtnW, xferY, xfBtnW, xferH, TRUE);
+  MoveWindow(g_input, pad, inputY, chatW, inputH, TRUE);
+  MoveWindow(g_send, pad * 2 + chatW, inputY, btnW, inputH, TRUE);
 }
 
 void show_member_menu(HWND hwnd, POINT pt) {
@@ -295,6 +395,20 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         core::members().tick();
         handle_member_events();
         if (core::members().take_dirty()) refresh_member_list();
+        core::filexfer().tick();
+        handle_xfer_events();
+        // 进度条：接收优先，其次发送
+        int pos = 0;
+        if (core::filexfer().receiving())
+          pos = static_cast<int>(core::filexfer().recv_done() * 100 /
+                                 (core::filexfer().recv_total() ? core::filexfer().recv_total()
+                                                                : 1));
+        else if (core::filexfer().sending())
+          pos = static_cast<int>(core::filexfer().send_done() * 100 /
+                                 (core::filexfer().send_total() ? core::filexfer().send_total()
+                                                                : 1));
+        SendMessageW(g_progress, PBM_SETPOS, pos, 0);
+        update_status();
       }
       return 0;
     case WM_APP_RX:
@@ -318,10 +432,14 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
       break;
     case WM_COMMAND:
       if (LOWORD(w) == IDC_SEND && HIWORD(w) == BN_CLICKED) on_send();
+      else if (LOWORD(w) == IDC_SENDFILE && HIWORD(w) == BN_CLICKED) on_send_file(hwnd);
+      else if (LOWORD(w) == IDC_PLAY && HIWORD(w) == BN_CLICKED && !g_lastReceived.empty())
+        ShellExecuteW(hwnd, L"open", g_lastReceived.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
       return 0;
     case WM_DESTROY: {
       KillTimer(hwnd, TIMER_TICK);
-      core::members().shutdown();  // 发送 BYE：其他成员立即移除我
+      core::filexfer().shutdown();  // 停发送线程（可能还在发包）
+      core::members().shutdown();   // 发送 BYE：其他成员立即移除我
       net::stop_rx_thread();
       app().sock.stop();
       // 清掉消息队列里尚未处理的 WM_APP_RX，避免退出时泄漏

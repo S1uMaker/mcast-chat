@@ -4,6 +4,7 @@
 #include <string>
 #include "app.hpp"
 #include "core/chat_ctrl.hpp"
+#include "core/file_xfer.hpp"
 #include "core/member_mgr.hpp"
 #include "net/rx_thread.hpp"
 #include "ui/main_window.hpp"
@@ -19,15 +20,20 @@ static std::string default_name() {
 }
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
-  // 用法：mcast-chat.exe [昵称] [--send <文本>]
-  // --send 为隐藏参数，仅用于自动化冒烟测试：启动后延时发送一条文本
+  // 用法：mcast-chat.exe [昵称] [--send <文本>] [--sendfile <路径>] [--drop <N>]
+  // --send/--sendfile 为隐藏参数，仅用于自动化冒烟测试；
+  // --drop N：本机接收文件时丢弃每第 N 块（验证 NACK 重传）
   int argc = 0;
   std::string name;
-  std::wstring autoSend;
+  std::wstring autoSend, autoSendFile;
   if (LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
     for (int i = 1; i < argc; ++i) {
       if (wcscmp(argv[i], L"--send") == 0 && i + 1 < argc) {
         autoSend = argv[++i];
+      } else if (wcscmp(argv[i], L"--sendfile") == 0 && i + 1 < argc) {
+        autoSendFile = argv[++i];
+      } else if (wcscmp(argv[i], L"--drop") == 0 && i + 1 < argc) {
+        app().testDropEvery = static_cast<int>(wcstol(argv[++i], nullptr, 10));
       } else if (name.empty()) {
         name = util::wide_to_utf8(argv[i]);
       }
@@ -63,6 +69,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     Sleep(1200);  // 等接收方窗口就绪
     bool ok = core::send_text(util::wide_to_utf8(autoSend));
     util::dlog("main: autosend ok=%d", (int)ok);
+  }
+  if (!autoSendFile.empty()) {
+    Sleep(1500);  // 等接收方就绪
+    std::string err;
+    if (!core::filexfer().start_send(util::wide_to_utf8(autoSendFile), &err))
+      util::dlog("main: sendfile failed: %s", err.c_str());
+    else
+      util::dlog("main: sendfile started");
   }
 
   MSG m;
