@@ -77,10 +77,14 @@ FileXfer& filexfer() {
 void FileXfer::send_file_msg(proto::MsgType type, const std::vector<uint8_t>& payload) {
   proto::Header h;
   h.type = type;
-  h.flags = 0;
   h.sender = app().uuid;
   h.seq = app().seq.fetch_add(1);
-  auto pkt = proto::encode_packet(h, payload);
+  uint16_t flags = 0;  // M4：加密开启且持有组密钥时 AES-GCM 加密载荷
+  std::string plain(reinterpret_cast<const char*>(payload.data()), payload.size());
+  std::string body = crypto::session().seal_payload(type, app().uuid, h.seq, plain, flags, &sendKey_);
+  h.flags = flags;
+  std::vector<uint8_t> fin(body.begin(), body.end());
+  auto pkt = proto::encode_packet(h, fin);
   app().sock.send(pkt.data(), pkt.size());
 }
 
@@ -143,6 +147,7 @@ bool FileXfer::start_send(const std::string& utf8Path, std::string* err) {
   sendStop_ = false;
   sendFinished_ = false;
   sending_ = true;
+  sendKey_ = crypto::session().current_key();  // M4：整份文件用同一把密钥快照
   push_event({XferEvent::SendStarted, sendName_, "", "", {}});
 
   uint64_t size = static_cast<uint64_t>(sz);

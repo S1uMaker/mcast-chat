@@ -127,6 +127,24 @@
 - 被踢端收到 KICK 后禁用输入，3 秒后自动退出。
 - UI：成员列表右键“踢出该成员”（仅房主可用）；状态栏实时显示成员数与本机角色。
 
+**M4 实现备注**（已完成，加密开关默认关）：
+
+- RSA-2048 密钥对启动时用 CNG 生成；公钥 blob（≈283B）随 HELLO/HELLO_ACK 广播，
+  收到即入公钥表。
+- 房主生成 32B 组密钥（BCryptGenRandom）→ 对每个在线成员公钥 RSA-OAEP(SHA-256)
+  信封 → `KEY_DIST` 多播分发（每包 4 个信封，超出自动分包）；成员变化去抖 2s
+  后自动重生成并重分发。
+- 数据面（TEXT/FILE_*）载荷 = `keyId(4B) + AES-256-GCM(密文+tag16B)`：
+  nonce = senderId 前 8B ‖ seq（确定性派生，同密钥不重放、无需传输）；
+  AAD = senderId‖seq‖type 绑定包头，防裁剪/拼接/篡改。
+- 重分发期间接收方保留上一把密钥（previous key），按 keyId 回退解密；
+  文件发送线程开局持密钥快照，换钥不影响在途传输。
+- TEXT 恒附 RSA-PSS 签名（FLAG_SIGNED）；KICK 房主签名（覆盖 targetId‖senderId），
+  验签失败丢弃；公钥未知时退回“信任当前房主”（HELLO 很快补齐公钥）。
+- 被踢/退出成员从公钥表移除 → 不在信封名单 → 拿不到新密钥 = 应用层强制离组。
+- UI“加密发送”复选框：房主打开即分发密钥；成员打开只加密自己的发送；
+  接收端只按报文标志与是否持钥决定解密。开关切换方便 Wireshark 抓包对比。
+
 ## 7. 文件可靠传输设计（需求 b）
 
 UDP 多播不可靠，大文件必须自己补可靠性（本设计 = 简化 NORM）：
@@ -201,7 +219,9 @@ mcast-chat/
     │   └── file_xfer.hpp/.cpp   文件收发状态机 + pacing + NACK      [M3 ✔]
     ├── crypto/
     │   ├── sha256.hpp/.cpp  CNG SHA-256（文件完整性校验）           [M3 ✔]
-    │   └── cng_rsa / cng_aes / secure_session（M4 待做）RSA-2048 / AES-256-GCM / 组密钥
+    │   ├── cng_rsa.hpp/.cpp RSA-2048 OAEP/PSS（身份/信封/签名）      [M4 ✔]
+    │   ├── cng_aes.hpp/.cpp AES-256-GCM（数据面载荷加密）           [M4 ✔]
+    │   └── secure_session.hpp/.cpp  组密钥信封分发/加解密封装        [M4 ✔]
     ├── util/
     │   ├── text.hpp/.cpp    UTF-8 ↔ UTF-16 转换、UTF-8 安全截断     [M1 ✔]
     │   └── log.hpp/.cpp     debug.log 调试日志                      [M1 ✔]

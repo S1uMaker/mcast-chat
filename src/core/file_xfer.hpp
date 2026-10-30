@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "../crypto/secure_session.hpp"
 #include "../protocol/codec.hpp"
 #include "../protocol/message.hpp"
 
@@ -71,6 +72,7 @@ class FileXfer {
   std::atomic<int> retxRound_{0};
   proto::Uuid sendFileId_{};
   std::string sendName_;
+  crypto::KeySnapshot sendKey_{};  // 发送线程的密钥快照（重分发不影响在途传输）
   std::mutex retxMtx_;
   std::vector<uint32_t> retxQueue_;   // 待重传块号（接收方 NACK 排入）
   std::vector<uint8_t> retxQueued_;   // 位图：已排队防重复

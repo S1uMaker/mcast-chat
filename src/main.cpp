@@ -6,6 +6,7 @@
 #include "core/chat_ctrl.hpp"
 #include "core/file_xfer.hpp"
 #include "core/member_mgr.hpp"
+#include "crypto/secure_session.hpp"
 #include "net/rx_thread.hpp"
 #include "ui/main_window.hpp"
 #include "util/log.hpp"
@@ -21,11 +22,13 @@ static std::string default_name() {
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
   // 用法：mcast-chat.exe [昵称] [--send <文本>] [--sendfile <路径>] [--drop <N>]
-  // --send/--sendfile 为隐藏参数，仅用于自动化冒烟测试；
+  //        [--senddelay <ms>] [--sendfiledelay <ms>]
+  // --send/--sendfile/--senddelay/--sendfiledelay 为隐藏参数，仅用于自动化冒烟测试；
   // --drop N：本机接收文件时丢弃每第 N 块（验证 NACK 重传）
   int argc = 0;
   std::string name;
   std::wstring autoSend, autoSendFile;
+  int sendDelayMs = 1200, fileDelayMs = 1500;
   if (LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
     for (int i = 1; i < argc; ++i) {
       if (wcscmp(argv[i], L"--send") == 0 && i + 1 < argc) {
@@ -34,6 +37,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         autoSendFile = argv[++i];
       } else if (wcscmp(argv[i], L"--drop") == 0 && i + 1 < argc) {
         app().testDropEvery = static_cast<int>(wcstol(argv[++i], nullptr, 10));
+      } else if (wcscmp(argv[i], L"--senddelay") == 0 && i + 1 < argc) {
+        sendDelayMs = static_cast<int>(wcstol(argv[++i], nullptr, 10));
+      } else if (wcscmp(argv[i], L"--sendfiledelay") == 0 && i + 1 < argc) {
+        fileDelayMs = static_cast<int>(wcstol(argv[++i], nullptr, 10));
       } else if (name.empty()) {
         name = util::wide_to_utf8(argv[i]);
       }
@@ -46,6 +53,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     MessageBoxW(nullptr, L"初始化身份失败（UUID 生成失败）", L"mcast-chat", MB_ICONERROR);
     return 1;
   }
+  crypto::session().init();  // M4：生成 RSA-2048 密钥对（公钥随 HELLO 广播）
 
   std::string err;
   if (!app().sock.start(net::kDefaultPort, net::kDefaultGroup, &err)) {
@@ -66,12 +74,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
   core::members().announce();  // 接收线程就绪后再宣告入组，避免丢 ACK
 
   if (!autoSend.empty()) {
-    Sleep(1200);  // 等接收方窗口就绪
+    Sleep(sendDelayMs);  // 等接收方窗口/组密钥就绪
     bool ok = core::send_text(util::wide_to_utf8(autoSend));
     util::dlog("main: autosend ok=%d", (int)ok);
   }
   if (!autoSendFile.empty()) {
-    Sleep(1500);  // 等接收方就绪
+    Sleep(fileDelayMs);  // 等接收方就绪
     std::string err;
     if (!core::filexfer().start_send(util::wide_to_utf8(autoSendFile), &err))
       util::dlog("main: sendfile failed: %s", err.c_str());

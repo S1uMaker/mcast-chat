@@ -86,6 +86,19 @@ public class WinEnum {
     }, IntPtr.Zero);
     return found;
   }
+  public static IntPtr FindButtonByText(IntPtr parent, string text) {
+    IntPtr found = IntPtr.Zero;
+    EnumChildWindows(parent, delegate(IntPtr h, IntPtr l) {
+      var cn = new StringBuilder(256); GetClassName(h, cn, 256);
+      if (cn.ToString() == "Button") {
+        var sb = new StringBuilder(256);
+        SendMessageGetText(h, 0x000D, (IntPtr)256, sb);
+        if (sb.ToString().Contains(text)) { found = h; return false; }
+      }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
 }
 "@
 
@@ -106,7 +119,7 @@ function StatusOf($h) {
   return [WinEnum]::ReadText($s)
 }
 
-$a = $null; $b = $null; $b2 = $null; $b3 = $null; $b4 = $null
+$a = $null; $b = $null; $b2 = $null; $b3 = $null; $b4 = $null; $b5 = $null; $b6 = $null
 try {
   # ---------- 1. Host starts alone ----------
   Write-Host "[smoke] PHASE 1: host starts alone"
@@ -214,9 +227,54 @@ try {
   }
   Stop-Process -Id $b4.Id -Force -ErrorAction SilentlyContinue
   Remove-Item $sample -Force -ErrorAction SilentlyContinue
+
+  # ---------- 8. Encrypted end-to-end (RSA-2048 envelope + AES-256-GCM) ----------
+  Write-Host "[smoke] PHASE 8: encrypted text & file"
+  # 房主 A 打开加密开关 → 生成并分发组密钥
+  $encA = [WinEnum]::FindButtonByText($ha, "加密")
+  Check ($encA -ne [IntPtr]::Zero) "encrypt checkbox exists"
+  [WinEnum]::SendMessage($encA, 0xF5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # BM_CLICK
+  Start-Sleep -Seconds 1
+  Check ((StatusOf $ha) -match "加密:开") "A reports encryption ON"
+
+  # B5 加入 → 房主自动换钥分发（含 B5 公钥信封）→ B5 打开开关 → 加密发送文本
+  $marker2 = "enc-marker-8231"
+  $b5 = Start-Process -FilePath $exePath -ArgumentList "LiSi","--send",$marker2,"--senddelay","4500" -PassThru
+  Start-Sleep -Milliseconds 2500
+  $hb5 = HwndOf $b5
+  $encB = [WinEnum]::FindButtonByText($hb5, "加密")
+  if ($encB -ne [IntPtr]::Zero) { [WinEnum]::SendMessage($encB, 0xF5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null }
+  $ok8 = $false
+  for ($i = 0; $i -lt 12; $i++) {
+    Start-Sleep -Seconds 2
+    if ((ChatOf $ha) -match $marker2) { $ok8 = $true; break }
+  }
+  Write-Host "[smoke] A chat tail: $(((ChatOf $ha) -split "`r`n" | Select-Object -Last 3) -join ' | ')"
+  Check $ok8 "encrypted text delivered and decrypted"
+
+  # B6 加入 → 加密发送 512KB 文件（叠加 --drop 5 的 20% 丢包）
+  $smallName = "enc_" + (Get-Random) + ".bin"
+  $small = Join-Path (Get-Location).Path $smallName
+  $sb2 = New-Object byte[] 524288
+  (New-Object Random 7).NextBytes($sb2)
+  [IO.File]::WriteAllBytes($small, $sb2)
+  $b6 = Start-Process -FilePath $exePath -ArgumentList "WangWu","--sendfile",$small,"--sendfiledelay","4000" -PassThru
+  $ok9 = $false
+  for ($i = 0; $i -lt 20; $i++) {
+    Start-Sleep -Seconds 3
+    if ((ChatOf $ha) -match ($smallName + " 接收完成")) { $ok9 = $true; break }
+  }
+  Check $ok9 "encrypted file received within 60s"
+  $rp8 = Join-Path (Join-Path (Get-Location).Path "received") $smallName
+  if ((Test-Path $rp8) -and $ok9) {
+    Check (((Get-FileHash $small -Algorithm SHA256).Hash) -eq ((Get-FileHash $rp8 -Algorithm SHA256).Hash)) "encrypted file SHA-256 matches source"
+  }
+  Stop-Process -Id $b5.Id -Force -ErrorAction SilentlyContinue
+  Stop-Process -Id $b6.Id -Force -ErrorAction SilentlyContinue
+  Remove-Item $small -Force -ErrorAction SilentlyContinue
 }
 finally {
-  foreach ($p in @($a, $b, $b2, $b3, $b4)) {
+  foreach ($p in @($a, $b, $b2, $b3, $b4, $b5, $b6)) {
     if ($p -ne $null) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
   }
 }

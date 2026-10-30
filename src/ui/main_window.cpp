@@ -10,6 +10,7 @@
 #include "../core/chat_ctrl.hpp"
 #include "../core/file_xfer.hpp"
 #include "../core/member_mgr.hpp"
+#include "../crypto/secure_session.hpp"
 #include "../net/rx_thread.hpp"
 #include "../protocol/codec.hpp"
 #include "../protocol/message.hpp"
@@ -27,6 +28,7 @@ constexpr int IDC_STATUS   = 105;
 constexpr int IDC_SENDFILE = 106;
 constexpr int IDC_PLAY     = 107;
 constexpr int IDC_PROGRESS = 108;
+constexpr int IDC_ENCRYPT  = 109;
 constexpr int IDM_KICK     = 40001;
 constexpr UINT_PTR TIMER_TICK = 1;
 
@@ -38,6 +40,7 @@ HWND g_status = nullptr;
 HWND g_sendfile = nullptr;
 HWND g_progress = nullptr;
 HWND g_play = nullptr;
+HWND g_encrypt = nullptr;
 HFONT g_font = nullptr;
 WNDPROC g_inputProc = nullptr;  // 输入框原窗口过程（手动子类化：回车即发送）
 std::vector<core::Member> g_rows;  // 与成员列表行一一对应（右键踢人用）
@@ -96,6 +99,7 @@ void update_status() {
   }
   if (core::filexfer().retx_round() > 0)
     s += L"（重传第 " + std::to_wstring(core::filexfer().retx_round()) + L" 轮）";
+  s += crypto::session().enabled() ? L"   加密:开" : L"   加密:关";
   SendMessageW(g_status, SB_SETTEXTW, 0, (LPARAM)s.c_str());
 }
 
@@ -236,7 +240,12 @@ void handle_rx(RxPacket* raw) {
   if (proto::parse_packet(raw->data, raw->len, pkt) && pkt.hdr.sender != a.uuid) {
     switch (pkt.hdr.type) {
       case proto::MSG_CHAT_TEXT: {
-        proto::Reader r(pkt.payload, pkt.payload_len);
+        std::string plain;
+        if (!crypto::session().unseal(pkt.hdr, pkt.payload, pkt.payload_len, plain)) {
+          append_system(L"收到一条无法解密/验签的消息（可能尚未获得组密钥）");
+          break;
+        }
+        proto::Reader r(reinterpret_cast<const uint8_t*>(plain.data()), plain.size());
         std::string name, text;
         if (r.utf8(name) && r.utf8(text) && r.ok()) {
           a.rxCount.fetch_add(1);
@@ -250,7 +259,8 @@ void handle_rx(RxPacket* raw) {
       case proto::MSG_HELLO_ACK:
       case proto::MSG_HEARTBEAT:
       case proto::MSG_BYE:
-      case proto::MSG_KICK: {
+      case proto::MSG_KICK:
+      case proto::MSG_KEY_DIST: {
         proto::Reader r(pkt.payload, pkt.payload_len);
         core::members().on_packet(pkt.hdr, r, raw->fromIp);
         handle_member_events();
@@ -262,13 +272,18 @@ void handle_rx(RxPacket* raw) {
       case proto::MSG_FILE_END:
       case proto::MSG_NACK:
       case proto::MSG_FILE_CANCEL: {
-        proto::Reader r(pkt.payload, pkt.payload_len);
+        std::string plain;
+        if (!crypto::session().unseal(pkt.hdr, pkt.payload, pkt.payload_len, plain)) {
+          util::dlog("xfer: drop undecryptable packet type=0x%02x", pkt.hdr.type);
+          break;
+        }
+        proto::Reader r(reinterpret_cast<const uint8_t*>(plain.data()), plain.size());
         core::filexfer().on_packet(pkt.hdr, r, raw->fromIp);
         handle_xfer_events();
         break;
       }
       default:
-        break;  // KEY_DIST 由 M4 接管
+        break;
     }
   }
   free(raw);
@@ -316,6 +331,9 @@ void create_controls(HWND hwnd, HINSTANCE hInst) {
   g_play = CreateWindowExW(0, L"BUTTON", L"▶ 播放",
       WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED, 0, 0, 0, 0, hwnd, (HMENU)IDC_PLAY,
       hInst, nullptr);
+  g_encrypt = CreateWindowExW(0, L"BUTTON", L"加密发送",
+      WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd, (HMENU)IDC_ENCRYPT, hInst,
+      nullptr);
 
   g_status = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE,
       0, 0, 0, 0, hwnd, (HMENU)IDC_STATUS, hInst, nullptr);
@@ -323,7 +341,7 @@ void create_controls(HWND hwnd, HINSTANCE hInst) {
   g_font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
       DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
-  HWND ctrls[] = {g_chat, g_members, g_input, g_send, g_sendfile, g_play, g_status};
+  HWND ctrls[] = {g_chat, g_members, g_input, g_send, g_sendfile, g_play, g_encrypt, g_status};
   for (HWND h : ctrls) SendMessageW(h, WM_SETFONT, (WPARAM)g_font, TRUE);
 }
 
@@ -347,7 +365,8 @@ void layout(HWND hwnd) {
   MoveWindow(g_sendfile, pad, xferY, xfBtnW, xferH, TRUE);
   MoveWindow(g_progress, pad + xfBtnW + pad, xferY, chatW - xfBtnW * 2 - pad * 2, xferH, TRUE);
   MoveWindow(g_play, pad + chatW - xfBtnW, xferY, xfBtnW, xferH, TRUE);
-  MoveWindow(g_input, pad, inputY, chatW, inputH, TRUE);
+  MoveWindow(g_input, pad, inputY, chatW - 92, inputH, TRUE);
+  MoveWindow(g_encrypt, pad + chatW - 86, inputY, 86, inputH, TRUE);
   MoveWindow(g_send, pad * 2 + chatW, inputY, btnW, inputH, TRUE);
 }
 
@@ -435,6 +454,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
       else if (LOWORD(w) == IDC_SENDFILE && HIWORD(w) == BN_CLICKED) on_send_file(hwnd);
       else if (LOWORD(w) == IDC_PLAY && HIWORD(w) == BN_CLICKED && !g_lastReceived.empty())
         ShellExecuteW(hwnd, L"open", g_lastReceived.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+      else if (LOWORD(w) == IDC_ENCRYPT && HIWORD(w) == BN_CLICKED) {
+        bool on = SendMessageW(g_encrypt, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        crypto::session().set_enabled(on);
+        util::dlog("ui: encrypt %s", on ? "ON" : "OFF");
+        if (on && core::members().is_host()) crypto::session().distribute_now();
+        update_status();
+      }
       return 0;
     case WM_DESTROY: {
       KillTimer(hwnd, TIMER_TICK);

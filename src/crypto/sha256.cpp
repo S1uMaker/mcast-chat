@@ -61,4 +61,30 @@ std::string sha256_file(const std::string& utf8Path, std::string* err) {
   return ok ? digest : std::string();
 }
 
+std::string sha256_bytes(const void* data, size_t len) {
+  std::string digest;
+  BCRYPT_ALG_HANDLE alg = nullptr;
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  std::vector<uint8_t> hashObj;
+  bool ok = false;
+  do {
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) break;
+    DWORD objLen = 0, cb = 0;
+    if (BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, (PUCHAR)&objLen, sizeof(objLen), &cb, 0) != 0)
+      break;
+    hashObj.resize(objLen);
+    if (BCryptCreateHash(alg, &hash, hashObj.data(), objLen, nullptr, 0, 0) != 0) break;
+    if (BCryptHashData(hash, (PUCHAR)data, static_cast<ULONG>(len), 0) != 0) break;
+    digest.resize(32);
+    if (BCryptFinishHash(hash, (PUCHAR)&digest[0], 32, 0) != 0) {
+      digest.clear();
+      break;
+    }
+    ok = true;
+  } while (false);
+  if (hash) BCryptDestroyHash(hash);
+  if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+  return ok ? digest : std::string();
+}
+
 }  // namespace crypto

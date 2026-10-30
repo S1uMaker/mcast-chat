@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include "../app.hpp"
+#include "../crypto/secure_session.hpp"
 #include "../util/log.hpp"
 
 namespace core {
@@ -72,7 +73,7 @@ void MemberManager::send_hello() {
   proto::Writer w(p);
   w.utf8(app().name);
   w.u64(joinTime_);
-  w.u16(0);  // 公钥 blob 长度（M4 填充 RSA 公钥）
+  w.utf8(crypto::session().public_key());  // M4：RSA 公钥随 HELLO 广播
   send_msg(proto::MSG_HELLO, p);
 }
 
@@ -82,7 +83,7 @@ void MemberManager::send_hello_ack(const proto::Uuid& target) {
   w.bytes(target.data(), target.size());
   w.utf8(app().name);
   w.u64(joinTime_);
-  w.u16(0);  // M4
+  w.utf8(crypto::session().public_key());
   send_msg(proto::MSG_HELLO_ACK, p);
 }
 
@@ -126,6 +127,7 @@ void MemberManager::upsert(const proto::Uuid& id, const std::string& name, uint6
     list_.push_back(nm);
     if (announce) events_.push_back({MemberEvent::Joined, nm.name});
     dirty_ = true;
+    crypto::session().on_membership_changed();  // 新成员需要拿到组密钥
     recompute_host();
     util::dlog("member: +%s (%zu online)", nm.name.c_str(), list_.size());
     return;
@@ -150,6 +152,8 @@ void MemberManager::remove(const proto::Uuid& id, bool kicked) {
     util::dlog("member: -%s (kicked=%d)", it->name.c_str(), (int)kicked);
     list_.erase(it);
     dirty_ = true;
+    crypto::session().drop_member_key(id);  // 移出信封分发名单（被踢者拿不到新密钥）
+    crypto::session().on_membership_changed();
     recompute_host();
     return;
   }
@@ -174,6 +178,7 @@ void MemberManager::recompute_host() {
     dirty_ = true;
     if (list_.size() > 1 || !best->self)  // 单机独自入组时不刷“成为房主”
       events_.push_back({MemberEvent::HostChanged, best->name});
+    crypto::session().on_membership_changed();
     util::dlog("member: host -> %s", best->name.c_str());
   }
 }
@@ -195,6 +200,7 @@ void MemberManager::on_packet(const proto::Header& h, proto::Reader& r, uint32_t
       std::string name, pk;
       uint64_t jt = 0;
       if (!(r.utf8(name) && r.u64(jt) && read_blob(r, pk) && r.ok())) return;
+      if (!pk.empty()) crypto::session().set_member_key(h.sender, pk);
       upsert(h.sender, name, jt, fromIp, /*announce=*/true);
       send_hello_ack(h.sender);  // 每个 HELLO 都回 ACK（重复到达也幂等）
       break;
@@ -206,6 +212,7 @@ void MemberManager::on_packet(const proto::Header& h, proto::Reader& r, uint32_t
       std::string name, pk;
       uint64_t jt = 0;
       if (!(r.utf8(name) && r.u64(jt) && read_blob(r, pk) && r.ok())) return;
+      if (!pk.empty()) crypto::session().set_member_key(h.sender, pk);
       upsert(h.sender, name, jt, fromIp, /*announce=*/false);
       break;
     }
@@ -221,7 +228,6 @@ void MemberManager::on_packet(const proto::Header& h, proto::Reader& r, uint32_t
       break;
     }
     case proto::MSG_KICK: {
-      // M2：只信“我认为的房主”发来的 KICK（M4 再叠加 RSA 签名验证）
       if (!hostValid_ || h.sender != hostId_) {
         util::dlog("member: ignore KICK from non-host");
         return;
@@ -229,9 +235,23 @@ void MemberManager::on_packet(const proto::Header& h, proto::Reader& r, uint32_t
       proto::Uuid target{};
       std::string sig;
       if (!r.bytes(target.data(), target.size()) || !read_blob(r, sig) || !r.ok()) return;
+      // M4：房主 RSA-PSS 签名验证（targetId||senderId）；签名无效直接丢弃；
+      // 公钥未知时退回“信任当前房主”的 M2 行为（心跳/HELLO 很快会补上公钥）
+      if (!sig.empty()) {
+        std::string kickData(reinterpret_cast<const char*>(target.data()), 16);
+        kickData += std::string(reinterpret_cast<const char*>(h.sender.data()), 16);
+        if (crypto::session().has_member_key(h.sender) &&
+            !crypto::session().verify_data(h.sender, kickData, sig)) {
+          util::dlog("member: KICK signature INVALID, ignored");
+          return;
+        }
+      }
       apply_kick(target);
       break;
     }
+    case proto::MSG_KEY_DIST:
+      crypto::session().handle_key_dist(r);
+      break;
     default:
       break;
   }
@@ -255,7 +275,12 @@ bool MemberManager::kick(const proto::Uuid& target, std::string* err) {
   std::vector<uint8_t> p;
   proto::Writer w(p);
   w.bytes(target.data(), target.size());
-  w.u16(0);  // M4：房主 RSA 私钥签名
+  std::string kickData(reinterpret_cast<const char*>(target.data()), 16);
+  kickData += std::string(reinterpret_cast<const char*>(app().uuid.data()), 16);
+  std::string sig;
+  crypto::session().sign_data(kickData, sig);  // M4：房主 RSA 签名，全员可验
+  w.u16(static_cast<uint16_t>(sig.size()));
+  if (!sig.empty()) w.bytes(sig.data(), sig.size());
   send_msg(proto::MSG_KICK, p);
   apply_kick(target);  // 本地同样生效（自己的回环包会被忽略）
   util::dlog("member: kicked %s", proto::uuid_to_string(target).c_str());
@@ -312,6 +337,7 @@ void MemberManager::tick() {
     dirty_ = true;
     recompute_host();
   }
+  crypto::session().tick(is_host());  // 房主：执行挂起的组密钥重分发（去抖）
 }
 
 // ---------------- 查询 ----------------

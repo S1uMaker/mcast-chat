@@ -6,7 +6,7 @@ SRCS = src/main.cpp src/app.cpp src/util/text.cpp src/util/log.cpp \
        src/net/multicast.cpp src/net/rx_thread.cpp \
        src/protocol/codec.cpp \
        src/core/chat_ctrl.cpp src/core/member_mgr.cpp src/core/file_xfer.cpp \
-       src/crypto/sha256.cpp \
+       src/crypto/sha256.cpp src/crypto/cng_rsa.cpp src/crypto/cng_aes.cpp src/crypto/secure_session.cpp \
        src/ui/main_window.cpp
 
 all: mcast-chat.exe
