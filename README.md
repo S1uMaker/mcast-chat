@@ -28,7 +28,7 @@ demo.bat
 - 成员管理：右侧列表实时显示成员（昵称/地址/在线状态/角色），**右键成员可踢出
   （仅房主可用）**；房主 = joinTime 最早的在线成员，离线自动继任。
 - 文件传输：点"发文件…"选择文件（音视频均可），多播分块发送（≈500 KB/s），
-  接收方经 NACK 重传收全并通过 SHA-256 校验后保存到 `received/`，
+  接收方经 NACK 重传收全并通过 SHA-256 校验后保存到 exe 同目录的 `received/`，
   点"▶ 播放"用系统默认播放器打开；进度见进度条与状态栏。
 - **加密（加分项）**：勾选"加密发送"——公钥随入组广播，房主用 RSA-OAEP 信封分发
   AES-256-GCM 组会话密钥，此后聊天与文件载荷全部加密；TEXT/踢人均附 RSA-PSS 签名；
@@ -48,6 +48,9 @@ test\nettest.exe
 
 :: 全链路冒烟测试（8 阶段 29 项：加入/聊天/离开/踢人/超时/丢包传文件/加密端到端，约 100 秒）
 powershell -NoProfile -ExecutionPolicy Bypass -File test\smoke.ps1
+
+:: 接收路径锚定检查（实例工作目录设在桌面，验证文件仍落 exe 目录的 received\）
+powershell -NoProfile -ExecutionPolicy Bypass -File test\cwd_check.ps1
 ```
 
 隐藏参数 `--send <文本>`：启动后延时 1.2s 自动发送一条文本，供自动化测试使用。

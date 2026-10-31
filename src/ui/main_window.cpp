@@ -211,7 +211,7 @@ void on_send_file(HWND hwnd) {
   ofn.lpstrFilter = L"所有文件 (*.*)\0*.*\0\0";
   ofn.lpstrFile = file;
   ofn.nMaxFile = MAX_PATH;
-  ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+  ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;  // 防对话框改工作目录
   if (!GetOpenFileNameW(&ofn)) return;
   std::string err;
   if (!core::filexfer().start_send(util::wide_to_utf8(file), &err))

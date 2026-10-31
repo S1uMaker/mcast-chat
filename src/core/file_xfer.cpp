@@ -52,16 +52,24 @@ std::vector<std::pair<uint32_t, uint32_t>> missing_ranges(const std::vector<uint
   return out;
 }
 
+// received\ 目录统一锚定在 exe 所在目录（绝对路径）：
+// 文件对话框会改变进程工作目录，相对路径会让收到的文件散落到别处
+std::wstring received_dir_w() {
+  std::wstring dir = util::exe_dir_w() + L"\\received";
+  CreateDirectoryW(dir.c_str(), nullptr);  // 已存在则忽略
+  return dir;
+}
+
 // 目标名冲突时追加 " (1)" " (2)"…
-std::wstring unique_target_name(const std::wstring& name) {
-  std::wstring target = L"received\\" + name;
+std::wstring unique_target_name(const std::wstring& dir, const std::wstring& name) {
+  std::wstring target = dir + L"\\" + name;
   if (GetFileAttributesW(target.c_str()) == INVALID_FILE_ATTRIBUTES) return name;
   size_t dot = name.find_last_of(L'.');
   std::wstring stem = (dot == std::wstring::npos) ? name : name.substr(0, dot);
   std::wstring ext = (dot == std::wstring::npos) ? L"" : name.substr(dot);
   for (int i = 1;; ++i) {
     std::wstring cand = stem + L" (" + std::to_wstring(i) + L")" + ext;
-    if (GetFileAttributesW((L"received\\" + cand).c_str()) == INVALID_FILE_ATTRIBUTES) return cand;
+    if (GetFileAttributesW((dir + L"\\" + cand).c_str()) == INVALID_FILE_ATTRIBUTES) return cand;
   }
 }
 
@@ -132,7 +140,6 @@ bool FileXfer::start_send(const std::string& utf8Path, std::string* err) {
     return false;
   }
 
-  CreateDirectoryW(L"received", nullptr);
   random_id(sendFileId_.data());
   sendName_ = basename_of(utf8Path);
   {
@@ -305,7 +312,9 @@ void FileXfer::start_recv(const proto::Header& h, const std::string& name, uint6
   recvLastAct_ = now_tick();
   recvBitmap_.assign((total + 7) / 8, 0);
   testDroppedOnce_.assign((total + 7) / 8, 0);
-  recvTmpPath_ = std::string("received/") + proto::uuid_to_string(recvFileId_) + ".part";
+  std::wstring tmpNameW =
+      util::utf8_to_wide(proto::uuid_to_string(recvFileId_)) + L".part";
+  recvTmpPath_ = util::wide_to_utf8(received_dir_w() + L"\\" + tmpNameW);
   recvFile_ = _wfopen(util::utf8_to_wide(recvTmpPath_).c_str(), L"wb");
   if (!recvFile_) {
     push_event({XferEvent::RecvFailed, name, "无法创建临时文件", "", {}});
@@ -416,8 +425,9 @@ void FileXfer::recv_evaluate() {
       push_event({XferEvent::RecvFailed, recvName_, "SHA-256 校验不一致", "", {}});
       util::dlog("xfer: sha mismatch for %s", recvName_.c_str());
     } else {
-      std::wstring finalName = unique_target_name(util::utf8_to_wide(recvName_));
-      std::wstring target = L"received\\" + finalName;
+      std::wstring dirW = received_dir_w();
+      std::wstring finalName = unique_target_name(dirW, util::utf8_to_wide(recvName_));
+      std::wstring target = dirW + L"\\" + finalName;
       if (MoveFileExW(util::utf8_to_wide(recvTmpPath_).c_str(), target.c_str(),
                       MOVEFILE_COPY_ALLOWED)) {
         lastReceived_ = util::wide_to_utf8(target);

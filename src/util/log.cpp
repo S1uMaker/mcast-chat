@@ -2,11 +2,14 @@
 #include <windows.h>
 #include <cstdarg>
 #include <cstdio>
+#include "text.hpp"
 
 namespace util {
 
 void dlog(const char* fmt, ...) {
-  FILE* f = fopen("debug.log", "a");
+  // 锚定到 exe 目录：进程工作目录会被文件对话框改变
+  std::wstring logPath = exe_dir_w() + L"\\debug.log";
+  FILE* f = _wfopen(logPath.c_str(), L"a");
   if (!f) return;
   SYSTEMTIME t;
   GetLocalTime(&t);

@@ -29,4 +29,13 @@ std::string utf8_truncate(const std::string& s, size_t maxBytes) {
   return s.substr(0, cut);
 }
 
+std::wstring exe_dir_w() {
+  wchar_t buf[MAX_PATH] = L"";
+  DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+  std::wstring path(buf, n);
+  size_t p = path.find_last_of(L'\\');
+  if (p == std::wstring::npos) return L".";
+  return path.substr(0, p);
+}
+
 }  // namespace util
