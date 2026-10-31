@@ -1,5 +1,5 @@
 ﻿param(
-  [string]$Exe = "mcast-chat.exe"
+  [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) "mcast-chat\mcast-chat.exe")
 )
 # M2 smoke test: join/leave/kick/host/self-exit + M1 regression (echo & multicast text).
 # Control text is read/written via WM_GETTEXT/WM_SETTEXT (GetWindowText is a stale
@@ -218,7 +218,7 @@ try {
   Write-Host "[smoke] A chat tail: $(((ChatOf $ha) -split "`r`n" | Select-Object -Last 4) -join ' | ')"
   Check $recvDone "file received within 90s despite ~20% loss"
   Check ((ChatOf $ha) -match "请求重传") "NACK retransmission was exercised"
-  $recvPath = Join-Path (Join-Path (Get-Location).Path "received") $sampleName
+  $recvPath = Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) "mcast-chat\received") $sampleName
   Check (Test-Path $recvPath) "received file saved under received/"
   if (Test-Path $recvPath) {
     $h1 = (Get-FileHash $sample -Algorithm SHA256).Hash
@@ -265,7 +265,7 @@ try {
     if ((ChatOf $ha) -match ($smallName + " 接收完成")) { $ok9 = $true; break }
   }
   Check $ok9 "encrypted file received within 60s"
-  $rp8 = Join-Path (Join-Path (Get-Location).Path "received") $smallName
+  $rp8 = Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) "mcast-chat\received") $smallName
   if ((Test-Path $rp8) -and $ok9) {
     Check (((Get-FileHash $small -Algorithm SHA256).Hash) -eq ((Get-FileHash $rp8 -Algorithm SHA256).Hash)) "encrypted file SHA-256 matches source"
   }

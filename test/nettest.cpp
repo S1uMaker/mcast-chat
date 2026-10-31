@@ -8,9 +8,9 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include "../src/net/multicast.hpp"
-#include "../src/protocol/codec.hpp"
-#include "../src/protocol/message.hpp"
+#include "../../mcast-chat/src/net/multicast.hpp"
+#include "../../mcast-chat/src/protocol/codec.hpp"
+#include "../../mcast-chat/src/protocol/message.hpp"
 
 using namespace net;
 using namespace proto;

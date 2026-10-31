@@ -2,7 +2,7 @@
 # exe 同目录的 received\ 下，而不是桌面
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$exe = Join-Path $root "mcast-chat.exe"
+$exe = Join-Path $root "mcast-chat\mcast-chat.exe"
 $desktop = [Environment]::GetFolderPath('Desktop')
 Get-Process mcast-chat -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 500
@@ -18,7 +18,7 @@ $a = Start-Process -FilePath $exe -ArgumentList "ZhangSan" -WorkingDirectory $de
 Start-Sleep -Milliseconds 1500
 $b = Start-Process -FilePath $exe -ArgumentList "LiSi","--sendfile",$src -WorkingDirectory $desktop -PassThru
 
-$recvPath = Join-Path (Join-Path $root "received") $leaf
+$recvPath = Join-Path (Join-Path $root "mcast-chat\received") $leaf
 $done = $false
 for ($i = 0; $i -lt 20; $i++) {
   Start-Sleep -Seconds 2
