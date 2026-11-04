@@ -85,7 +85,7 @@ class FileXfer {
   uint32_t recvChunkSize_ = 0, recvTotal_ = 0, recvGot_ = 0;
   int recvNackRounds_ = 0;
   std::vector<uint8_t> recvBitmap_;      // 已收块位图
-  std::vector<uint8_t> testDroppedOnce_; // 测试钩子：每块只丢一次（模拟真实丢包）
+  bool testDropCeased_ = false;          // 测试钩子：发出首个 NACK 后停止丢弃，放行重传
   FILE* recvFile_ = nullptr;
 
   std::string lastReceived_;

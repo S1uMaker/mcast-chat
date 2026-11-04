@@ -311,7 +311,7 @@ void FileXfer::start_recv(const proto::Header& h, const std::string& name, uint6
   recvEvalAt_ = 0;
   recvLastAct_ = now_tick();
   recvBitmap_.assign((total + 7) / 8, 0);
-  testDroppedOnce_.assign((total + 7) / 8, 0);
+  testDropCeased_ = false;
   std::wstring tmpNameW =
       util::utf8_to_wide(proto::uuid_to_string(recvFileId_)) + L".part";
   recvTmpPath_ = util::wide_to_utf8(received_dir_w() + L"\\" + tmpNameW);
@@ -355,11 +355,12 @@ void FileXfer::on_packet(const proto::Header& h, proto::Reader& r, uint32_t from
       if (seq >= recvTotal_) return;
       recvLastAct_ = now_tick();
       if (recvBitmap_[seq >> 3] & (1 << (seq & 7))) return;  // 重复块
-      // 测试钩子：模拟真实丢包——每个块只丢第一次，重传放行
-      if (app().testDropEvery > 0 && seq % static_cast<uint32_t>(app().testDropEvery) == 0 &&
-          !(testDroppedOnce_[seq >> 3] & (1 << (seq & 7)))) {
-        testDroppedOnce_[seq >> 3] |= static_cast<uint8_t>(1 << (seq & 7));
-        util::dlog("xfer: TEST drop chunk %u (once)", seq);
+      // 测试钩子：首个 NACK 发出前，持续丢弃每第 N 块的“所有”副本——即使网络把
+      // 每个多播包重复投递两份（多虚拟网卡环境常见），洞也必然保留到首次评估，
+      // 保证 NACK 重传被确定性触发
+      if (app().testDropEvery > 0 && !testDropCeased_ &&
+          seq % static_cast<uint32_t>(app().testDropEvery) == 0) {
+        util::dlog("xfer: TEST drop chunk %u", seq);
         return;
       }
       size_t dataLen = r.remaining();
@@ -462,6 +463,7 @@ void FileXfer::recv_evaluate() {
                     std::to_string(recvNackRounds_) + " 轮请求重传",
                 "", {}});
     recvEvalAt_ = now_tick() + 2500;  // 等重传到达后再次自查
+    testDropCeased_ = true;           // 首个 NACK 已发出：停止丢弃，放行重传副本
     util::dlog("xfer: nack round %d, missing %u", recvNackRounds_, missingCount);
   } else {
     recv_fail("重传 5 轮仍未收全");
