@@ -1,12 +1,6 @@
-mcast-chat/mcast-chat.exe
-mcast-chat/*.o
-mcast-chat/received/
-mcast-chat/debug.log
+mcast-chat.exe
 test/nettest.exe
-report/_crypto.pcapng
-report/*.aux
-report/*.log
-report/*.out
-report/*.xdv
-report/*.fls
-report/*.fdb_latexmk
+*.o
+debug.log
+received/
+test/sample_*.bin
